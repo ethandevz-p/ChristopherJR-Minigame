@@ -99,6 +99,8 @@ static void SaveHighScore(int score) {
     if (f) {
         fprintf(f, "%d", score);
         fclose(f);
+    } else {
+        fprintf(stderr, "Warning: could not save high score to %s\n", HIGHSCORE_FILE);
     }
 }
 
@@ -180,7 +182,7 @@ static void SpawnObstacle(Game *g) {
     float dx = px - x;
     float dy = py - y;
     float dist = sqrtf(dx * dx + dy * dy);
-    if (dist == 0.0f) dist = 1.0f;
+    if (dist < 0.0001f) dist = 1.0f;
     vx = dx / dist;
     vy = dy / dist;
 
@@ -244,10 +246,10 @@ static void UpdateParticles(Game *g, float dt) {
         if (p->life >= p->maxLife) p->active = false;
     }
 
-    if (GetRandomValue(0, 4) == 0) {
+    if (g->state == STATE_PLAY && GetRandomValue(0, 4) == 0) {
         SpawnParticle(g, (float)GetRandomValue(0, SCREEN_WIDTH), -12.0f, COLOR_CYAN);
     }
-    if (GetRandomValue(0, 6) == 0) {
+    if (g->state == STATE_PLAY && GetRandomValue(0, 6) == 0) {
         SpawnParticle(g, (float)SCREEN_WIDTH + 12.0f, (float)GetRandomValue(0, SCREEN_HEIGHT), COLOR_PURPLE);
     }
 }
@@ -346,10 +348,34 @@ static void DrawTransition(const Game *g) {
 
 static void ChangeState(Game *g, GameState next) {
     bool wasPlaying = (g->state == STATE_PLAY);
+    bool wasPaused = (g->state == STATE_PAUSE);
+
+    /* Persist high score when leaving a play session */
+    if (wasPlaying && next != STATE_PLAY && next != STATE_PAUSE) {
+        if ((int)g->score > g->highScore) {
+            g->highScore = (int)g->score;
+            SaveHighScore(g->highScore);
+        }
+    }
+
     g->state = next;
     NewTransition(g);
-    if (next == STATE_PLAY && g->musicLoaded) PlayMusicStream(g->music);
-    if (wasPlaying && next != STATE_PLAY && next != STATE_PAUSE) StopMusic(g);
+
+    /* Music management */
+    if (g->musicLoaded) {
+        if (next == STATE_PAUSE && wasPlaying) {
+            PauseMusicStream(g->music);
+        } else if (next == STATE_PLAY) {
+            if (wasPaused) {
+                ResumeMusicStream(g->music);
+            } else {
+                PlayMusicStream(g->music);
+            }
+        } else if (next == STATE_GAMEOVER || next == STATE_MENU ||
+                   next == STATE_HOWTO) {
+            StopMusicStream(g->music);
+        }
+    }
 }
 
 static void InitGame(Game *g) {
@@ -357,9 +383,16 @@ static void InitGame(Game *g) {
     g->state = STATE_MENU;
     g->highScore = LoadHighScore();
 
+    RepositionUI(g);
+
+    InitParticles(g);
+    InitAudioAssets(g);
+}
+
+static void RepositionUI(Game *g) {
     float bw = 300.0f, bh = 60.0f;
-    float cx = SCREEN_WIDTH * 0.5f;
-    float startY = SCREEN_HEIGHT * 0.45f;
+    float cx = (float)GetScreenWidth() * 0.5f;
+    float startY = (float)GetScreenHeight() * 0.45f;
 
     g->btnPlay = (Button){ (Rectangle){ cx - bw * 0.5f, startY, bw, bh }, "PLAY" };
     g->btnHowto = (Button){ (Rectangle){ cx - bw * 0.5f, startY + 80, bw, bh }, "HOW TO PLAY" };
@@ -369,9 +402,6 @@ static void InitGame(Game *g) {
     g->btnMenu = (Button){ (Rectangle){ cx - bw * 0.5f, startY + 140, bw, bh }, "MAIN MENU" };
     g->btnBack = (Button){ (Rectangle){ cx - bw * 0.5f, startY + 160, bw, bh }, "BACK" };
     g->btnResume = (Button){ (Rectangle){ cx - bw * 0.5f, startY + 20, bw, bh }, "RESUME" };
-
-    InitParticles(g);
-    InitAudioAssets(g);
 }
 
 static void UpdateMenu(Game *g, Vector2 mouse) {
@@ -382,10 +412,6 @@ static void UpdateMenu(Game *g, Vector2 mouse) {
     } else if (ButtonHovered(&g->btnHowto, mouse) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         PlayClick(g);
         ChangeState(g, STATE_HOWTO);
-    } else if (ButtonHovered(&g->btnExit, mouse) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-        PlayClick(g);
-        /* Exit is handled in main loop via WindowShouldClose, but close here directly */
-        /* We signal exit by setting a special flag via closing window */
     }
 }
 
@@ -464,6 +490,7 @@ static void UpdatePlaying(Game *g, float dt) {
 
         if (o->position.x < -100 || o->position.x > swInt + 100 ||
             o->position.y < -100 || o->position.y > shInt + 100) {
+            Vector2 deadPos = o->position;
             o->active = false;
             g->obstacleCount--;
             for (int j = i; j < g->obstacleCount; j++) {
@@ -472,7 +499,7 @@ static void UpdatePlaying(Game *g, float dt) {
             i--;
             PlayPoint(g);
             for (int k = 0; k < 6; k++) {
-                SpawnParticle(g, o->position.x, o->position.y, COLOR_RED);
+                SpawnParticle(g, deadPos.x, deadPos.y, COLOR_RED);
             }
         }
     }
@@ -502,7 +529,6 @@ static void UpdateGameOver(Game *g, Vector2 mouse) {
         ChangeState(g, STATE_PLAY);
     } else if (ButtonHovered(&g->btnMenu, mouse) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         PlayClick(g);
-        StopMusic(g);
         ChangeState(g, STATE_MENU);
     }
 }
@@ -629,6 +655,10 @@ int main(void) {
         if (dt > 0.05f) dt = 0.05f;
 
         Vector2 mouse = GetMousePosition();
+
+        if (IsWindowResized()) {
+            RepositionUI(&g);
+        }
 
         if (g.state == STATE_MENU) {
             UpdateMenu(&g, mouse);
